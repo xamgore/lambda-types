@@ -1,5 +1,9 @@
+{-# LANGUAGE TupleSections #-}
+
 import Data.List (find)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (mapMaybe, fromMaybe)
+import Control.Monad (join)
+import Control.Applicative ((<|>))
 
 
 -- Inductive definition: T = V | T → T
@@ -54,6 +58,10 @@ splitArrows (TArr l r) = l : splitArrows r
 
 type Arr = (Maybe Type, Type)
 
+mkArrow :: Maybe Type -> Type -> Type
+mkArrow Nothing t  = t
+mkArrow (Just l) t = TArr l t
+
 -- subarrows ((a→b)→c) = [(Nothing, (a→b)→c), (Just (a→b), c)]
 subArrows :: Type -> [Arr]
 subArrows type' = zip left right
@@ -63,68 +71,71 @@ subArrows type' = zip left right
     left  = Nothing : (Just <$> scanl1 TArr s)
 
 
+-- subArrowTo c (a→b)→c = (Just (a→b), c)
 subArrowTo :: Type -> Type -> Maybe Arr
 subArrowTo t type' = find ((t ==) . snd) (subArrows type')
 
--- --
--- subArrows :: Type -> [(Type, Type)]
--- subArrows (TVar _)   = []
--- subArrows (TArr l r) = (l, r) : map add (subArrows r)
---   where add (lsub, rsub) = (TArr l lsub, rsub)
---
---
--- first :: (a -> b) -> (a, c) -> (b, c)
--- first f (x, y) = (f x, y)
---
---
--- type TArrow = (Maybe Type, Type)
---
--- -- subArrowTo (c→d) ((a→b)→c→d) = Just (Just a→b, c→d)
--- -- subArrowTo (c)   (c)         = Just (Nothing, c)
--- -- subArrowTo (c)   (a→d)       = Nothing
--- subArrowTo :: Type -> Type -> Maybe TArrow
--- subArrowTo t type'
---   | t == type' = Just (Nothing, t)
---   | otherwise  = first Just <$> arrow
---     where arrow = find ((t ==) . snd) (subArrows type')
---
---
---
--- type Var = String
---
--- -- x:a→b  <=>   ("x", TArr (TVar "a") (TVar "b"))
--- type Decl = (Var, Type)
---
--- -- Г = { x:a, y:a→b }
--- type Context = [Decl]
---
---
--- ctxSubArrows :: Context -> Type -> [(Var, TArrow)]
--- ctxSubArrows ctx t = mapMaybe (traverse (subArrowTo t)) ctx
---
---
--- -- testGetArrowsToType =
--- --     all ((res ==) . ctxSubArrows ctx) [b, atob]
--- --   where
--- b    = TVar "b"
--- atob = TArr (TVar "a") b
--- ctx  = [ ("x", TVar "c"), ("x", atob), ("x", TArr b atob) ]
--- res  = drop 1 ctx
 
---
--- type Hole = (Type, Context)
---
--- data TNFHole =
---   Hole |                    -- L(B; Г)
---   HoleAbstr Decl TNFHole |  -- λx:A. L(B; Г,x:A)
---   HoleApp   Decl [Hole]     -- x. L(B₁; Г) ··· L(Bn; Г)
---
+type Var = String
+
+type Decl = (Var, Type) -- y:a→b
+
+type Context = [Decl]   -- Г = { x:a, y:a→b }
+
+
+ctxSubArrowTo :: Context -> Type -> [(Var, Arr)]
+ctxSubArrowTo ctx t = mapMaybe (traverse (subArrowTo t)) ctx
+
+
+type Hole = (Type, Context)
+
+data NFHole =
+  Hole Hole |              -- L(B; Г)
+  HoleAbstr Decl NFHole |  -- λx:A. L(B; Г,x:A)
+  HoleApp   Decl [NFHole]  -- x L(B₁; Г) ··· L(Bn; Г)
+  deriving (Show, Eq)
+
+expand :: NFHole -> [NFHole]
+expand (Hole (a@(TVar _), ctx)) = map apps (ctxSubArrowTo ctx a)
+  where
+    holesFrom  :: Type -> [Hole]
+    holesFrom t      = (, ctx) <$> splitArrows t
+    buildHoles :: Maybe Type -> [NFHole]
+    buildHoles b     = Hole <$> (init $ holesFrom $ mkArrow b $ TVar "")
+    apps :: (Var, (Maybe Type, Type)) -> NFHole
+    apps (x, (b, a)) = HoleApp (x, mkArrow b a) (buildHoles b)
+
+expand (Hole ((TArr a b), ctx)) = [HoleAbstr newVar hole]
+  where newVar = ("x", a) -- TODO fresh name
+        hole   = Hole (b, newVar : ctx)
+
+expand (HoleAbstr abstr hole) = HoleAbstr abstr <$> expand hole
+
+expand (HoleApp head' holes) = HoleApp head' <$> (sequence $ map expand holes)
+
+
+run :: NFHole -> [[NFHole]]
+run hole = takeWhile (not . null) $ (iterate . concatMap) expand [hole]
+
+runWithTypeAndCtx :: Type -> Context -> [[NFHole]]
+runWithTypeAndCtx type' ctx = run $ Hole (type', ctx)
+
+runWithType = flip runWithTypeAndCtx []
+
+
+-- data TNFHole = TailHole [Decl] Decl [TNFHole] | -- [] x L(B₁; Г) ··· L(Bn; Г)
+--                HeadHole [Decl] Hole [TNFHole]   -- λx:A. L(B; Г) []
+--                deriving (Show, Eq)
 --
 -- expand :: TNFHole -> TNFHole
--- expand = undefined
---
---
---
+-- expand (HeadHole abstr (type', ctx) tails)
+--   | (TVar a)   <- type' =
+--      map (\(x, b, _) -> TailHole [] (x, a) ...) (ctxSubArrows ctx a)
+--   | (TApp l r) <-
+-- -- Too dumb
+
+
+
 --
 -- -- Abstractor, the head variable and Bem's tails
 -- data TNF = TNF [Decl] Decl [TNF]
