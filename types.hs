@@ -46,8 +46,6 @@ rnk (TArr l r) = max (1 + rnk l) (rnk r)
 ord :: Type -> Integer
 ord = (+1) . rnk
 
-s  = pow (fromNum 1) 2 (fromNum 3)
-
 
 
 -- splitArrows (a → (b → c) → d) = [a, b→c, d]
@@ -70,7 +68,6 @@ subArrows type' = zip left right
     right = scanr1 TArr s
     left  = Nothing : (Just <$> scanl1 TArr s)
 
-
 -- subArrowTo c (a→b)→c = (Just (a→b), c)
 subArrowTo :: Type -> Type -> Maybe Arr
 subArrowTo t type' = find ((t ==) . snd) (subArrows type')
@@ -82,80 +79,69 @@ type Decl = (Var, Type) -- y:a→b
 
 type Context = [Decl]   -- Г = { x:a, y:a→b }
 
+type Abstr = [Decl]
+
+notIn :: Var -> Context -> Bool
+v `notIn` ctx = not $ elem v $ fst <$> ctx
 
 ctxSubArrowTo :: Context -> Type -> [(Var, Arr)]
 ctxSubArrowTo ctx t = mapMaybe (traverse (subArrowTo t)) ctx
 
 
-type Hole = (Type, Context)
 
-data NFHole =
-  Hole Hole |              -- L(B; Г)
-  HoleAbstr Decl NFHole |  -- λx:A. L(B; Г,x:A)
-  HoleApp   Decl [NFHole]  -- x L(B₁; Г) ··· L(Bn; Г)
-  deriving (Show, Eq)
+-- Abstractor, the head variable and Bem's tails
+data TNF = TNF Abstr Decl [TNF]
 
-expand :: NFHole -> [NFHole]
-expand (Hole (a@(TVar _), ctx)) = map apps (ctxSubArrowTo ctx a)
+instance Show TNF where
+  show (TNF abstr (hvar, htype) tails) =
+      concatMap lambda abstr ++ head ++ concatMap apply tails
+    where
+      head = "(" ++ hvar ++ ":" ++ show htype ++ ")"
+
+      lambda :: Decl -> String
+      lambda (var', type') = "λ" ++ var' ++ ":" ++ show type' ++ ". "
+
+      apply :: TNF -> String
+      apply t@(TNF [] _ _) = " "  ++ show t
+      apply t              = " (" ++ show t ++ ")"
+
+
+toTNF :: Var -> Type -> TNF
+toTNF v t = TNF [] (v, t) []
+
+
+e = TNF [ ("x", TArr (TVar "a") (TVar "b")) ]
+        ("x", TArr (TVar "a") (TVar "b"))
+        [
+          TNF [ ("x", TArr (TVar "a") (TVar "b")) ]
+              ("x", TArr (TVar "a") (TVar "b"))
+              []
+        ]
+
+
+applyRule :: Context -> Type -> Abstr -> [TNF]
+applyRule ctx (TArr a b) abstr = [TNF (abstr ++ [("x", a)]) ("M", b) []]
+applyRule ctx a@(TVar _) abstr = map apps $ ctxSubArrowTo ctx a
   where
-    holesFrom  :: Type -> [Hole]
-    holesFrom t      = (, ctx) <$> splitArrows t
-    buildHoles :: Maybe Type -> [NFHole]
-    buildHoles b     = Hole <$> (init $ holesFrom $ mkArrow b $ TVar "")
-    apps :: (Var, (Maybe Type, Type)) -> NFHole
-    apps (x, (b, a)) = HoleApp (x, mkArrow b a) (buildHoles b)
-
-expand (Hole ((TArr a b), ctx)) = [HoleAbstr newVar hole]
-  where newVar = ("x", a) -- TODO fresh name
-        hole   = Hole (b, newVar : ctx)
-
-expand (HoleAbstr abstr hole) = HoleAbstr abstr <$> expand hole
-
-expand (HoleApp head' holes) = HoleApp head' <$> (sequence $ map expand holes)
+    buildHoles :: Maybe Type -> [TNF]
+    buildHoles b     = zipWith toTNF ((("M" ++) . show) <$> [1..]) (init $ splitArrows $ mkArrow b $ TVar "")
+    apps :: (Var, Arr) -> TNF
+    apps (x, (b, a)) = TNF abstr (x, mkArrow b a) (buildHoles b)
 
 
-run :: NFHole -> [[NFHole]]
-run hole = takeWhile (not . null) $ (iterate . concatMap) expand [hole]
+expand :: Context -> TNF -> [TNF]
+expand ctx tnf@(TNF abstr (var, type') [])
+  | var `notIn` ctx' = applyRule ctx' type' abstr
+  | otherwise        = [] -- TODO or [tnf]?
+  where ctx' = ctx ++ abstr
 
-runWithTypeAndCtx :: Type -> Context -> [[NFHole]]
-runWithTypeAndCtx type' ctx = run $ Hole (type', ctx)
-
-runWithType = flip runWithTypeAndCtx []
-
-
--- data TNFHole = TailHole [Decl] Decl [TNFHole] | -- [] x L(B₁; Г) ··· L(Bn; Г)
---                HeadHole [Decl] Hole [TNFHole]   -- λx:A. L(B; Г) []
---                deriving (Show, Eq)
---
--- expand :: TNFHole -> TNFHole
--- expand (HeadHole abstr (type', ctx) tails)
---   | (TVar a)   <- type' =
---      map (\(x, b, _) -> TailHole [] (x, a) ...) (ctxSubArrows ctx a)
---   | (TApp l r) <-
--- -- Too dumb
+expand ctx (TNF abstr head' tails) = TNF abstr head' <$> expandedTails
+  where expandedTails = sequence $ map (expand (ctx ++ abstr)) tails
 
 
 
---
--- -- Abstractor, the head variable and Bem's tails
--- data TNF = TNF [Decl] Decl [TNF]
---
--- instance Show TNF where
---   show (TNF abstr (hvar, _) tails) =
---       concatMap lambda abstr ++ hvar ++ concatMap apply tails
---     where
---       lambda :: Decl -> String
---       lambda (var', type') = "λ" ++ var' ++ ":" ++ show type' ++ ". "
---
---       apply :: TNF -> String
---       apply t@(TNF [] _ _) = " "  ++ show t
---       apply t              = " (" ++ show t ++ ")"
---
---
--- e = TNF [ ("x", TArr (TVar "a") (TVar "b")) ]
---         ("x", TArr (TVar "a") (TVar "b"))
---         [
---           TNF [ ("x", TArr (TVar "a") (TVar "b")) ]
---               ("x", TArr (TVar "a") (TVar "b"))
---               []
---         ]
+
+run :: Context -> Type -> [[TNF]]
+run ctx type' = takeWhile (not . null) $ generate (expand ctx) [zeroGen]
+  where generate = iterate . concatMap
+        zeroGen  = TNF [] ("M", type') []
