@@ -1,14 +1,14 @@
 {-# LANGUAGE TupleSections #-}
 
-import Data.List (find)
+import Data.List (find, inits)
 import Data.Maybe (mapMaybe, fromMaybe)
-import Control.Monad (join)
-import Control.Applicative ((<|>))
+import Control.Monad (join, forM)
+import Control.Monad.State
+import Data.IORef
 
 
 -- Inductive definition: T = V | T → T
 data Type = TVar String | TArr Type Type deriving (Eq)
-
 
 instance Show Type where
   show (TVar x) = x
@@ -34,43 +34,33 @@ nk :: Integer -> Integer -> Type
 nk 0 _ = fromNum 0
 nk n k = pow (fromNum $ n - 1) k (fromNum 0)
 
--- depth of binary tree with (→) in nodes
-dpt :: Type -> Integer
-dpt (TVar _)   = 1
-dpt (TArr l r) = 1 + max (dpt l) (dpt r)
+-- depth of a binary tree with (→) in nodes
+depth :: Type -> Integer
+depth (TVar _)   = 1
+depth (TArr l r) = 1 + max (depth l) (depth r)
 
-rnk :: Type -> Integer
-rnk (TVar _)   = 0
-rnk (TArr l r) = max (1 + rnk l) (rnk r)
+rank :: Type -> Integer
+rank (TVar _)   = 0
+rank (TArr l r) = max (1 + rank l) (rank r)
 
-ord :: Type -> Integer
-ord = (+1) . rnk
-
-
-
--- splitArrows (a → (b → c) → d) = [a, b→c, d]
-splitArrows :: Type -> [Type]
-splitArrows t@(TVar _) = [t]
-splitArrows (TArr l r) = l : splitArrows r
+order :: Type -> Integer
+order = (+1) . rank
 
 
-type Arr = (Maybe Type, Type)
 
-mkArrow :: Maybe Type -> Type -> Type
-mkArrow Nothing t  = t
-mkArrow (Just l) t = TArr l t
+-- split (a→(b→c)→d) = [a, b→c, d]
+split :: Type -> [Type]
+split t@(TVar _) = [t]
+split (TArr l r) = l : split r
 
--- subarrows ((a→b)→c) = [(Nothing, (a→b)→c), (Just (a→b), c)]
-subArrows :: Type -> [Arr]
-subArrows type' = zip left right
-  where
-    s     = splitArrows type'
-    right = scanr1 TArr s
-    left  = Nothing : (Just <$> scanl1 TArr s)
+-- By type B1→…→Bn return a list of ([B1,…,Bk], [Bk+1→…→Bn])
+subArrows :: Type -> [([Type], Type)]
+subArrows type' = zip (init $ inits s) (scanr1 TArr s)
+  where s  = split type'
 
--- subArrowTo c (a→b)→c = (Just (a→b), c)
-subArrowTo :: Type -> Type -> Maybe Arr
-subArrowTo t type' = find ((t ==) . snd) (subArrows type')
+-- subArrowTo d (a→b)→c→d = Just ((a→b)→c→d, [a→b,c])
+subArrowTo :: Type -> Type -> Maybe (Type, [Type])
+subArrowTo t type' = (type', ) <$> fst <$> find ((t ==) . snd) (subArrows type')
 
 
 type Var = String
@@ -81,10 +71,14 @@ type Context = [Decl]   -- Г = { x:a, y:a→b }
 
 type Abstr = [Decl]
 
-notIn :: Var -> Context -> Bool
-v `notIn` ctx = not $ elem v $ fst <$> ctx
+has :: Context -> Var -> Bool
+ctx `has` v = elem v $ fst <$> ctx
 
-ctxSubArrowTo :: Context -> Type -> [(Var, Arr)]
+notIn :: Var -> Context -> Bool
+v `notIn` ctx = not $ ctx `has` v
+
+-- Find all functions to type t
+ctxSubArrowTo :: Context -> Type -> [(Var, (Type, [Type]))]
 ctxSubArrowTo ctx t = mapMaybe (traverse (subArrowTo t)) ctx
 
 
@@ -96,7 +90,7 @@ instance Show TNF where
   show (TNF abstr (hvar, htype) tails) =
       concatMap lambda abstr ++ head ++ concatMap apply tails
     where
-      head = "(" ++ hvar ++ ":" ++ show htype ++ ")"
+      head = hvar -- "(" ++ hvar ++ ":" ++ show htype ++ ")"
 
       lambda :: Decl -> String
       lambda (var', type') = "λ" ++ var' ++ ":" ++ show type' ++ ". "
@@ -106,42 +100,90 @@ instance Show TNF where
       apply t              = " (" ++ show t ++ ")"
 
 
-toTNF :: Var -> Type -> TNF
-toTNF v t = TNF [] (v, t) []
+
+toLower :: String -> String
+toLower = map sub where
+  sub ch = if '0' <= ch && ch <= '9'
+           then toEnum $ fromEnum ch - fromEnum '0' + fromEnum '₀'
+           else ch
+
+varNameByRank :: Type -> String
+varNameByRank = get . fromInteger . rank
+  where get idx = if idx < length names then names !! idx else "ℱ"
+        names   = ["x", "f", "F", "Ф"]
 
 
-e = TNF [ ("x", TArr (TVar "a") (TVar "b")) ]
-        ("x", TArr (TVar "a") (TVar "b"))
-        [
-          TNF [ ("x", TArr (TVar "a") (TVar "b")) ]
-              ("x", TArr (TVar "a") (TVar "b"))
-              []
-        ]
+inc :: State Integer Integer
+inc = state (liftM2 (,) (1 +) (1 +))
+
+buildTails :: [Type] -> State Integer [TNF]
+buildTails bs =
+  forM bs $ \b -> do
+    idx <- toLower . show <$> inc
+    return $ TNF [] ('M' : idx, b) []  -- TODO M may be in context Г
 
 
-applyRule :: Context -> Type -> Abstr -> [TNF]
-applyRule ctx (TArr a b) abstr = [TNF (abstr ++ [("x", a)]) ("M", b) []]
-applyRule ctx a@(TVar _) abstr = map apps $ ctxSubArrowTo ctx a
-  where
-    buildHoles :: Maybe Type -> [TNF]
-    buildHoles b     = zipWith toTNF ((("M" ++) . show) <$> [1..]) (init $ splitArrows $ mkArrow b $ TVar "")
-    apps :: (Var, Arr) -> TNF
-    apps (x, (b, a)) = TNF abstr (x, mkArrow b a) (buildHoles b)
+
+-- apply two-level grammar's rule as in Wajsberg/Ben-Yelles algorithm
+applyRule :: Context -> Type -> Abstr -> [State Integer TNF]
+
+-- L(a) = x L(M1:b1)..L(Mn:bn), (b1 → ... bn → a) in Г
+applyRule ctx a@(TVar _) abstr = do
+  let funcsToA = ctx `ctxSubArrowTo` a :: [(Var, (Type, [Type]))]
+
+  flip map funcsToA $ \(f, (type', bs)) -> do
+    tails <- buildTails bs
+    return $ TNF abstr (f, type') tails
+
+-- L(a → b) = \x:a. L(M:b)
+applyRule ctx (TArr a b) abstr = pure $ do
+  idx <- toLower . show <$> inc
+  let m = 'M'              : idx
+  let x = varNameByRank a ++ idx
+  return $ TNF (abstr ++ [(x, a)]) (m, b) []
 
 
-expand :: Context -> TNF -> [TNF]
+
+-- apply rules for the inner substructure
+-- if there are several branches, the result is a cross product
+expand :: Context -> TNF -> [State Integer TNF]
 expand ctx tnf@(TNF abstr (var, type') [])
   | var `notIn` ctx' = applyRule ctx' type' abstr
-  | otherwise        = [] -- TODO or [tnf]?
+  | otherwise        = []
   where ctx' = ctx ++ abstr
 
-expand ctx (TNF abstr head' tails) = TNF abstr head' <$> expandedTails
-  where expandedTails = sequence $ map (expand (ctx ++ abstr)) tails
+expand ctx (TNF abstr head' tails) = fmap attachTo . sequence <$> expandedTails
+  where expandedTails  = sequence $ map (expand (ctx ++ abstr)) tails
+        attachTo tails = TNF abstr head' tails
 
 
-
-
+-- run Wajsberg/Ben-Yelles algorithm and save intermediate results
 run :: Context -> Type -> [[TNF]]
-run ctx type' = takeWhile (not . null) $ generate (expand ctx) [zeroGen]
+run ctx type' = map (fst <$>) $ takeWhile (not . null) $ generate step [zeroGen]
   where generate = iterate . concatMap
-        zeroGen  = TNF [] ("M", type') []
+        step (tnf, count) = (flip runState count) <$> (expand ctx tnf)
+        zeroGen  = (TNF [] ("M", type') [], 0)
+
+
+
+hasFreeVarsInCtx :: Context -> TNF -> Bool
+hasFreeVarsInCtx ctx (TNF abstr (var, _) tails) =
+  var `notIn` ctx' || any (hasFreeVarsInCtx ctx') tails
+  where ctx' = ctx ++ abstr
+
+
+termsOfType :: Type -> [TNF]
+termsOfType = filter (not . hasFreeVarsInCtx []) . concat . run []
+
+
+prettyPrint :: [[TNF]] -> IO ()
+prettyPrint history = do
+  i <- newIORef 0
+  forM_ history $ \terms -> do
+    putStr "Generation #"
+    readIORef i >>= print
+    modifyIORef i (+1)
+
+    forM_ terms $ \term -> do
+      print term
+    putStrLn ""
