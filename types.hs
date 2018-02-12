@@ -16,6 +16,18 @@ instance Show Type where
   show (TArr l            r) =        show l ++  "→" ++ show r
 
 
+-- Symbol = shows where there is a TVar
+-- Example: "a" =>~ ("b" =>= "c") ~>= "d"
+--  a→(b→c)→d
+infixr 2 ~>, ~>~, ~>=, =>~, =>=
+(~>)  = TArr
+(~>~) = TArr
+l ~>= r = l ~> (TVar r)
+l =>~ r = (TVar l) ~> r
+l =>= r = (TVar l) ~>= r
+
+
+
 -- Some nice constructors, operators, properties
 -- not used in the algorithm, but in tests.
 
@@ -107,25 +119,50 @@ toLower = map sub where
            then toEnum $ fromEnum ch - fromEnum '0' + fromEnum '₀'
            else ch
 
+
+varNames = ["x", "f", "F", "Ф", "ℱ"]
+
+getElem :: [a] -> Integer -> a
+[]     `getElem` _ = error "Empty list"
+[x]    `getElem` _ = x
+(x:_)  `getElem` 0 = x
+(_:xs) `getElem` i = xs `getElem` (i - 1)
+
+setElem :: [a] -> Integer -> (a -> a) -> [a]
+setElem []     _ _  = error "Empty list"
+setElem [x]    _ op = [op x]
+setElem (x:xs) 0 op = (op x : xs)
+setElem (x:xs) i op = x : setElem xs (i - 1) op
+
+
 varNameByRank :: Type -> String
 varNameByRank = get . fromInteger . rank
-  where get idx = if idx < length names then names !! idx else "ℱ"
-        names   = ["x", "f", "F", "Ф"]
+  where get idx = if idx < length varNames
+                  then varNames !! idx
+                  else last varNames
 
 
-inc :: State Integer Integer
-inc = state (liftM2 (,) (1 +) (1 +))
+-- Counter for (M, [x, f, F, Ф, ℱ])
+type Counter a = State (Integer, [Integer]) a
 
-buildTails :: [Type] -> State Integer [TNF]
+incM :: Counter Integer
+incM = state (\(m, cs) -> (m, (m + 1, cs)))
+
+inc :: Integer -> Counter (Integer, Integer)
+inc idx = state (\(m, cs) ->
+  ((m, cs `getElem` idx), (m + 1, setElem cs idx (+1))))
+
+
+buildTails :: [Type] -> Counter [TNF]
 buildTails bs =
   forM bs $ \b -> do
-    idx <- toLower . show <$> inc
+    idx <- toLower . show <$> incM
     return $ TNF [] ('M' : idx, b) []  -- TODO M may be in context Г
 
 
 
 -- apply two-level grammar's rule as in Wajsberg/Ben-Yelles algorithm
-applyRule :: Context -> Type -> Abstr -> [State Integer TNF]
+applyRule :: Context -> Type -> Abstr -> [Counter TNF]
 
 -- L(a) = x L(M1:b1)..L(Mn:bn), (b1 → ... bn → a) in Г
 applyRule ctx a@(TVar _) abstr = do
@@ -137,16 +174,16 @@ applyRule ctx a@(TVar _) abstr = do
 
 -- L(a → b) = \x:a. L(M:b)
 applyRule ctx (TArr a b) abstr = pure $ do
-  idx <- toLower . show <$> inc
-  let m = 'M'              : idx
-  let x = varNameByRank a ++ idx
+  (idm, idx) <- inc (rank a)
+  let m = 'M' :              lower idm
+  let x = varNameByRank a ++ lower idx
   return $ TNF (abstr ++ [(x, a)]) (m, b) []
-
+  where lower i = if i == 1 then "" else toLower $ show i
 
 
 -- apply rules for the inner substructure
 -- if there are several branches, the result is a cross product
-expand :: Context -> TNF -> [State Integer TNF]
+expand :: Context -> TNF -> [Counter TNF]
 expand ctx tnf@(TNF abstr (var, type') [])
   | var `notIn` ctx' = applyRule ctx' type' abstr
   | otherwise        = []
@@ -162,7 +199,8 @@ run :: Context -> Type -> [[TNF]]
 run ctx type' = map (fst <$>) $ takeWhile (not . null) $ generate step [zeroGen]
   where generate = iterate . concatMap
         step (tnf, count) = (flip runState count) <$> (expand ctx tnf)
-        zeroGen  = (TNF [] ("M", type') [], 0)
+        zeroGen   = (TNF [] ("M", type') [], zeroState)
+        zeroState = (1, varNames >> [1])  -- all indexes = 1
 
 
 
