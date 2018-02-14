@@ -1,5 +1,8 @@
 {-# LANGUAGE TupleSections #-}
 
+module Types where
+
+
 import Data.List (find, inits)
 import Data.Maybe (mapMaybe, fromMaybe)
 import Control.Monad (join, forM)
@@ -8,7 +11,7 @@ import Data.IORef
 
 
 -- Inductive definition: T = V | T → T
-data Type = TVar String | TArr Type Type deriving (Eq)
+data Type = TVar String | TArr Type Type deriving (Eq, Ord)
 
 instance Show Type where
   show (TVar x) = x
@@ -96,13 +99,18 @@ ctxSubArrowTo ctx t = mapMaybe (traverse (subArrowTo t)) ctx
 
 
 -- Abstractor, the head variable and Bem's tails
-data TNF = TNF Abstr Decl [TNF]
+data TNF = TNF Abstr Decl [TNF] deriving (Eq, Ord)
 
 instance Show TNF where
   show (TNF abstr (hvar, htype) tails) =
-      concatMap lambda abstr ++ head ++ concatMap apply tails
+      concatMap lambda abstr ++ lbrace ++ head ++ concatMap apply tails ++ rbrace
     where
       head = hvar -- "(" ++ hvar ++ ":" ++ show htype ++ ")"
+
+      -- TODO refactor
+      brace = case htype of (TVar _)  -> False; otherwise -> True
+      lbrace = if brace then "(" else ""
+      rbrace = if brace then ")" else ""
 
       lambda :: Decl -> String
       lambda (var', type') = "λ" ++ var' ++ ":" ++ show type' ++ ". "
